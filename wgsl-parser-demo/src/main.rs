@@ -10,5 +10,6 @@ struct Uniforms {
 "#;
 
 fn main() {
-    wgsl_parser::inspect_from_source(SHADER);
+    let cpp_source = wgsl_parser::generate_cpp_binding(SHADER);
+    println!("// C++ Source:\n{}", cpp_source);
 }

@@ -1,4 +1,4 @@
-import { greet, run, generate_cpp_binding } from '../../wgsl-parser-wasm/pkg';
+import { generate_cpp_binding } from '../../wgsl-parser-wasm/pkg';
 import './style.css';
 
 const SHADER = `
@@ -11,9 +11,6 @@ struct Uniforms {
 @group(0) @binding(1) var outputTexture: texture_storage_2d<rgba8unorm,write>;
 @group(0) @binding(2) var<uniform> uniforms: Uniforms;
 `;
-
-const ret = run(SHADER);
-console.log(JSON.parse(ret));
 
 function component() {
   const element = document.createElement('div');
