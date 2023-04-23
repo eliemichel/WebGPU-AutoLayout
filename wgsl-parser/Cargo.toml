@@ -1,0 +1,10 @@
+[package]
+name = "wgsl-parser"
+version = "0.1.0"
+edition = "2021"
+authors = ["Elie Michel <elie.michel@exppad.com>"]
+description = "Backend of the WebGPU-Autolayout webapp"
+license = "MIT"
+
+[dependencies]
+naga = { version = "0.12.0", features  = ["wgsl-in"] }
