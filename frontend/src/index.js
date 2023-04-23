@@ -79,6 +79,7 @@ function infoComponent() {
     This is a small utility tool to generate C++ structures that match the memory
     layout of WGSL host-sharable structures, as defined in
     <a href="https://gpuweb.github.io/gpuweb/wgsl/#structure-member-layout">the specification</a>.
+    You may <a href="https://github.com/eliemichel/WebGPU-AutoLayout">Fork me on GitHub</a>.
   </em>`;
 
   const root = document.createElement('div');

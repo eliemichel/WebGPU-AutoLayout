@@ -1,6 +1,8 @@
 WebGPU Auto-layout
 ==================
 
+Running like: https://eliemichel.github.io/WebGPU-AutoLayout
+
 Building
 --------
 
