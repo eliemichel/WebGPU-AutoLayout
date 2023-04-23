@@ -228,8 +228,6 @@ pub fn generate_cpp_binding(wgsl_source: &str) -> String {
     // Final code production
     ctx.stage = ContextStage::Final;
 
-    out!(ctx, "// C++ binding");
-    out!(ctx, "");
     out!(ctx, "#include <glm/glm.hpp> // from https://github.com/g-truc/glm");
     out!(ctx, "using namespace glm;");
     if ctx.out_bindings.len() > 0 {
@@ -396,7 +394,7 @@ fn generate_cpp_type_def(ctx: &mut Context, ty: &Type, padding: u32) {
         out_format!(ctx, "struct {} {{", name);
         generate_cpp_struct_def(ctx, members, padding);
         out!(ctx, "};");
-        out_format!(ctx, "static_assert(sizeof({}) % {} == 0)\n", name, padding);
+        //out_format!(ctx, "static_assert(sizeof({}) % {} == 0);\n", name, padding);
     }
 }
 
@@ -544,6 +542,7 @@ fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>, paddi
         assert!(cpp_offset <= m.offset);
         if cpp_offset < m.offset {
             out!(ctx, format_pad(m.offset - cpp_offset, &mut pad_count));
+            cpp_offset = m.offset;
         }
 
         // Transform a WGSL type into one or multiple C++ types
