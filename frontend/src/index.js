@@ -21,8 +21,11 @@ struct Uniforms {
 
 const SHADER = `
 struct Uniforms {
-    test: vec3<f32>,
-    kernel: mat4x4<f32>,
+    position: vec3<f32>,
+    view: mat4x4<f32>,
+
+    // Even complex members work, e.g.:
+    @align(128) stuff: array<mat2x3<f32>,5>,
 }
 `;
 

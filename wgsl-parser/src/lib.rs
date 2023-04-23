@@ -433,41 +433,25 @@ fn generate_cpp_fields(ty: &Type, ctx: &mut Context) -> Vec<CppType> {
                 Float => "",
                 Bool => "d",
             };
+            let mut s = size.to_u32();
+            if s == 3 { s = 4; }
             vec![CppType {
-                name: Some(format!("{}vec{}", prefix, size.to_u32())),
-                size: size.to_u32() * width as u32,
+                name: Some(format!("{}vec{}", prefix, s)),
+                size: s * width as u32,
             }]
         },
         Matrix{columns, rows, width} => {
             let c = columns.to_u32();
-            let r = rows.to_u32();
+            let mut r = rows.to_u32();
+            if r == 3 { r = 4; }
             let col_type = Vector{width, size: rows, kind: Float};
             let align = align_of(&col_type, ctx);
             let cpp_col_size = width as u32 * r;
-            if align == cpp_col_size {
-                if columns == rows {
-                    vec![CppType {
-                        name: Some(format!("mat{}", c)),
-                        size: c * r * width as u32,
-                    }]
-                } else {
-                    (0..c).map(|_| CppType {
-                        name: Some(format!("vec{}", r)),
-                        size: r * width as u32,
-                    }).collect()
-                }
-            } else {
-                (0..2*c).map(|i| match i % 2 {
-                    0 => CppType {
-                        name: Some(format!("vec{}", r)),
-                        size: r * width as u32,
-                    },
-                    _ => CppType {
-                        name: None, // padding
-                        size: align - cpp_col_size,
-                    },
-                }).collect()
-            }
+            assert_eq!(align, cpp_col_size);
+            vec![CppType {
+                name: Some(format!("mat{}x{}", c, r)),
+                size: c * r * width as u32,
+            }]
         },
         Atomic{kind, width} => vec![CppType {
             name: Some(kind.to_cpp()),
@@ -551,8 +535,8 @@ fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>, paddi
 
         if has_multiple_fields {
             out_format!(ctx,
-                "\n  // '{}' is split in {}, at byte offset {}, size {}",
-                name, cpp_fields.len(), m.offset, type_size
+                "\n  // '{}' is split in {}, at byte offset {}",
+                name, cpp_fields.len(), m.offset
             );
         }
 
@@ -563,8 +547,8 @@ fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>, paddi
                     true => format!("  {} {}_col{};",
                         cpp_type_name, name, sub_field_index
                     ),
-                    false => format!("  {} {}; // at byte offset {}, size {}",
-                        cpp_type_name, name, m.offset, type_size
+                    false => format!("  {} {}; // at byte offset {}",
+                        cpp_type_name, name, m.offset
                     )
                 },
                 None => {
