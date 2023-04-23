@@ -1,29 +1,70 @@
+/**
+ * WARNING: This code is messy, i.e., it works but is far from idiomatic.
+ * It mostly comes from a 1-day hackathon by somebody who is not 100% fluent
+ * in rust. Any suggestion for organizing it better is welcome!
+ */
+
 use naga::{
     front::wgsl::Frontend,
+    TypeInner::{
+        Struct, Array, Scalar, Vector, Matrix, Atomic,
+    },
     TypeInner,
-    TypeInner::{Struct},
+    ConstantInner,
+    ArraySize::{Constant, Dynamic},
     Type,
+    GlobalVariable,
     StructMember,
     Module,
     Handle,
+    ScalarValue,
     ScalarKind,
+    ScalarKind::{Float, Uint, Sint, Bool},
     VectorSize,
 };
 
 use std::{
-    collections::{LinkedList},
+    collections::{LinkedList, HashMap},
     cmp::max,
 };
 
+enum ContextStage {
+    Structs,
+    PaddedStructs,
+    Bindings,
+}
 struct Context<'a> {
-    out: LinkedList<String>,
     module: &'a Module,
+
+    // Output sections
+    out_structs: LinkedList<String>,
+    out_padded_structs: LinkedList<String>,
+    out_bindings: LinkedList<String>,
+
+    stage: ContextStage,
+
+    // Set of structs for which we need to define a C++ equivalent with correct padding
+    // For each such type, we save its name.
+    // NB: This is populated while filling out_structs.
+    padded_structs: HashMap<Handle<Type>, String>,
 }
 impl<'a> Context<'a> {
     fn from_module(module: &'a Module) -> Self {
         return Self {
             module: module,
-            out: LinkedList::new()
+            out_structs: LinkedList::new(),
+            out_padded_structs: LinkedList::new(),
+            out_bindings: LinkedList::new(),
+            stage: ContextStage::Structs,
+            padded_structs: HashMap::new(),
+        }
+    }
+
+    fn get_out(&mut self) -> &mut LinkedList<String> {
+        return match self.stage {
+            ContextStage::Structs => &mut self.out_structs,
+            ContextStage::PaddedStructs => &mut self.out_padded_structs,
+            ContextStage::Bindings => &mut self.out_bindings,
         };
     }
 }
@@ -39,10 +80,10 @@ trait ToCpp {
 impl ToCpp for ScalarKind {
     fn to_cpp(&self) -> String {
         return match self {
-            ScalarKind::Sint => "int32_t",
-            ScalarKind::Uint => "uint32_t",
-            ScalarKind::Float => "float",
-            ScalarKind::Bool => "bool",
+            Sint => "int32_t",
+            Uint => "uint32_t",
+            Float => "float",
+            Bool => "bool",
         }.to_string()
     }
 }
@@ -63,8 +104,8 @@ impl ToU32 for VectorSize {
 // https://gpuweb.github.io/gpuweb/wgsl/#alignment-and-size
 fn align_of(inner: &TypeInner, ctx: &Context) -> u32 {
     match inner {
-        TypeInner::Scalar{width, ..} => (*width).into(),
-        TypeInner::Vector{width, size, ..} => {
+        Scalar{width, ..} => (*width).into(),
+        Vector{width, size, ..} => {
             let s = match size {
                 VectorSize::Bi => 2,
                 VectorSize::Tri => 4, // yep
@@ -72,16 +113,16 @@ fn align_of(inner: &TypeInner, ctx: &Context) -> u32 {
             };
             (s * width).into()
         },
-        TypeInner::Matrix{width, rows, ..} => {
-            let col_type = TypeInner::Vector{width: *width, size: *rows, kind: ScalarKind::Float};
+        Matrix{width, rows, ..} => {
+            let col_type = Vector{width: *width, size: *rows, kind: Float};
             align_of(&col_type, ctx)
         },
-        TypeInner::Atomic{..} => 4,
-        TypeInner::Array{base, ..} => {
+        Atomic{..} => 4,
+        Array{base, ..} => {
             let base_inner = &ctx.module.types[*base].inner;
             align_of(base_inner, ctx)
         },
-        TypeInner::Struct{members, ..} => {
+        Struct{members, ..} => {
             let mut maximum = 0;
             for m in members {
                 let ty_inner = &ctx.module.types[m.ty].inner;
@@ -90,66 +131,6 @@ fn align_of(inner: &TypeInner, ctx: &Context) -> u32 {
             maximum
         },
         _ => 0,//panic!("Type is not host-sharable!")
-    }
-}
-
-trait ToCppType {
-    fn to_cpp(&self, ctx: &Context) -> Vec<CppType>;
-}
-impl ToCppType for Type {
-    fn to_cpp(&self, ctx: &Context) -> Vec<CppType> {
-        return match self.inner {
-            TypeInner::Scalar{kind, width} => vec![CppType {
-                name: Some(format!("{}", kind.to_cpp())),
-                size: width as u32,
-            }],
-            TypeInner::Vector{size, kind, width} => vec![CppType {
-                name: Some(format!("vec{}<{}>", size.to_u32(), kind.to_cpp())),
-                size: size.to_u32() * width as u32,
-            }],
-            TypeInner::Matrix{columns, rows, width} => {
-                let c = columns.to_u32();
-                let r = rows.to_u32();
-                let col_type = TypeInner::Vector{width, size: rows, kind: ScalarKind::Float};
-                let align = align_of(&col_type, ctx);
-                let cpp_col_size = width as u32 * r;
-                if align == cpp_col_size {
-                    if columns == rows {
-                        vec![CppType {
-                            name: Some(format!("mat{}", c)),
-                            size: c * r * width as u32,
-                        }]
-                    } else {
-                        (0..c).map(|_| CppType {
-                            name: Some(format!("vec{}", r)),
-                            size: r * width as u32,
-                        }).collect()
-                    }
-                } else {
-                    (0..2*c).map(|i| match i % 2 {
-                        0 => CppType {
-                            name: Some(format!("vec{}", r)),
-                            size: r * width as u32,
-                        },
-                        _ => CppType {
-                            name: None, // padding
-                            size: align - cpp_col_size,
-                        },
-                    }).collect()
-                }
-            },
-            TypeInner::Atomic{kind, width} => vec![CppType {
-                name: Some(format!("atomic<{}>", kind.to_cpp())),
-                size: width as u32,
-            }],
-            //TypeInner::Array{base, size, stride} => format!("array<{}, {}:{}>", base, size, stride),
-            // Array (of host-sharable element)
-            // Struct (of host-sharable element)
-            _ => vec![CppType {
-                name: Some(format!("[Error: Type is not host-sharable!]")),
-                size: 0,
-            }],
-        }
     }
 }
 
@@ -165,39 +146,209 @@ pub fn generate_cpp_binding(wgsl_source: &str) -> String {
 
     let mut ctx = Context::from_module(&module);
 
-    ctx.out.push_back("// C++ binding".to_string());
-    ctx.out.push_back("#include <glm/glm.hpp>".to_string());
-    ctx.out.push_back("using namespace glm;".to_string());
-    ctx.out.push_back("".to_string());
-
-    ctx.out.push_back("// Host-sharable structures".to_string());
-    ctx.out.push_back("".to_string());
+    // Host-sharable structs
+    ctx.stage = ContextStage::Structs;
     for entry in module.types.iter() {
-        generate_cpp_type_def(&mut ctx, &entry);
+        generate_cpp_type_def(&mut ctx, &entry.1, 16);
     }
 
-    ctx.out.push_back("// Bind Group Layouts".to_string());
-    ctx.out.push_back("".to_string());
+    // Extra structs needed to build host-sharable structs
+    ctx.stage = ContextStage::PaddedStructs;
+    for entry in ctx.padded_structs.clone().iter() {
+        let value_ty = &ctx.module.types[*entry.0];
+        let ty = Type {
+            name: Some(entry.1.clone()),
+            inner: TypeInner::Struct {
+                members: vec![StructMember{
+                    name: Some("value".to_string()),
+                    ty: *entry.0,
+                    binding: None,
+                    offset: 0,
+                }],
+                span: value_ty.inner.size(&ctx.module.constants),
+            },
+        };
+        let padding = align_of(&value_ty.inner, &ctx);
+        generate_cpp_type_def(&mut ctx, &ty, padding);
+    }
 
-    ctx.out.push_back("// Bind Groups".to_string());
-    ctx.out.push_back("".to_string());
+    // Bindings
+    ctx.stage = ContextStage::Bindings;
+    for entry in module.global_variables.iter() {
+        generate_cpp_bind_layout(&mut ctx, &entry.1);
+    }
 
-    return ctx.out.into_iter().collect::<Vec<_>>().join("\n");
+    // Final code production
+    let mut out: LinkedList<String> = LinkedList::new();
+
+    out.push_back("// C++ binding".to_string());
+    out.push_back("#include <glm/glm.hpp>".to_string());
+    out.push_back("using namespace glm;".to_string());
+    out.push_back("".to_string());
+
+    if ctx.out_padded_structs.len() > 0 {
+        out.push_back("// Padded structures".to_string());
+        out.push_back("".to_string());
+        out.append(&mut ctx.out_padded_structs);
+    }
+
+    if ctx.out_structs.len() > 0 {
+        out.push_back("// Host-sharable structures".to_string());
+        out.push_back("".to_string());
+        out.append(&mut ctx.out_structs);
+    }
+
+    if ctx.out_bindings.len() > 0 {
+        out.push_back("// Bind Group Layouts".to_string());
+        out.push_back("".to_string());
+        out.append(&mut ctx.out_bindings);
+    }
+
+    return out.into_iter().collect::<Vec<_>>().join("\n");
 }
 
-fn generate_cpp_type_def(ctx: &mut Context, entry: &(Handle<Type>, &Type)) {
-    let (_handle, type_def) = entry;
+fn generate_cpp_bind_layout(ctx: &mut Context, variable: &GlobalVariable) {
     let anonymous: String = "<anonymous>".to_string();
-    let name = match &type_def.name {
+    let name = match &variable.name {
         Some(name) => name,
         None => &anonymous
     };
-    
-    if let Struct{members, span: _} = &type_def.inner {
-        ctx.out.push_back(format!("struct {} {{", name));
-        generate_cpp_struct_def(ctx, members);
-        ctx.out.push_back("};".to_string());
-        ctx.out.push_back(format!("static_assert(sizeof({}) % 16 == 0)\n", name));
+
+    ctx.get_out().push_back(format!("var {};", name));
+}
+
+fn generate_cpp_type_def(ctx: &mut Context, ty: &Type, padding: u32) {
+    let anonymous: String = "<anonymous>".to_string();
+    let name = match &ty.name {
+        Some(name) => name,
+        None => &anonymous
+    };
+
+    if let Struct{members, span: _} = &ty.inner {
+        ctx.get_out().push_back(format!("struct {} {{", name));
+        generate_cpp_struct_def(ctx, members, padding);
+        ctx.get_out().push_back("};".to_string());
+        ctx.get_out().push_back(format!("static_assert(sizeof({}) % {} == 0)\n", name, padding));
+    }
+}
+
+/**
+ * When using an array<T, N> whose base type T is not representable without
+ * extra padding, we create a new struct to represent T.
+ */
+fn add_extra_struct(ty: Handle<Type>, ctx: &mut Context) -> String {
+    match &ctx.module.types[ty].inner {
+        Matrix{columns, rows, ..} => {
+            let c = columns.to_u32();
+            let r = rows.to_u32();
+            let name = format!("padded_mat{c}x{r}");
+            ctx.padded_structs.insert(ty, name.clone());
+            name
+        },
+        Vector{size: VectorSize::Tri, ..} => {
+            let name = format!("padded_vec3");
+            ctx.padded_structs.insert(ty, name.clone());
+            name
+        },
+        _ => { panic!("add_extra_struct() must only be called on a type for which generate_cpp_fields() returns more than one field.") },
+    }
+}
+
+fn generate_cpp_fields(ty: &Type, ctx: &mut Context) -> Vec<CppType> {
+    match ty.inner {
+        Scalar{kind, width} => vec![CppType {
+            name: Some(format!("{}", kind.to_cpp())),
+            size: width as u32,
+        }],
+        Vector{size, kind, width} => {
+            let prefix = match kind {
+                Sint => "i",
+                Uint => "u",
+                Float => "",
+                Bool => "d",
+            };
+            vec![CppType {
+                name: Some(format!("{}vec{}", prefix, size.to_u32())),
+                size: size.to_u32() * width as u32,
+            }]
+        },
+        Matrix{columns, rows, width} => {
+            let c = columns.to_u32();
+            let r = rows.to_u32();
+            let col_type = Vector{width, size: rows, kind: Float};
+            let align = align_of(&col_type, ctx);
+            let cpp_col_size = width as u32 * r;
+            if align == cpp_col_size {
+                if columns == rows {
+                    vec![CppType {
+                        name: Some(format!("mat{}", c)),
+                        size: c * r * width as u32,
+                    }]
+                } else {
+                    (0..c).map(|_| CppType {
+                        name: Some(format!("vec{}", r)),
+                        size: r * width as u32,
+                    }).collect()
+                }
+            } else {
+                (0..2*c).map(|i| match i % 2 {
+                    0 => CppType {
+                        name: Some(format!("vec{}", r)),
+                        size: r * width as u32,
+                    },
+                    _ => CppType {
+                        name: None, // padding
+                        size: align - cpp_col_size,
+                    },
+                }).collect()
+            }
+        },
+        Atomic{kind, width} => vec![CppType {
+            name: Some(kind.to_cpp()),
+            size: width as u32,
+        }],
+        Array{base, size, stride} => {
+            let base_ty = &ctx.module.types[base];
+            let cpp_fields = generate_cpp_fields(base_ty, ctx);
+            let base_name = match cpp_fields.len() {
+                1 => {
+                    if cpp_fields[0].size % align_of(&base_ty.inner, &ctx) == 0 {
+                        match &cpp_fields[0].name {
+                            Some(name) => name.clone(),
+                            None => { panic!("There should not be an anonymous type here.") },
+                        }
+                    } else {
+                        add_extra_struct(base, ctx)
+                    }
+                },
+                _ => add_extra_struct(base, ctx)
+            };
+            match size {
+                Constant(cst) => match ctx.module.constants[cst].inner {
+                    ConstantInner::Scalar{value: ScalarValue::Uint(s), ..} => vec![CppType {
+                        name: Some(format!("std::array<{}, {}>", base_name, s)),
+                        size: s as u32 * stride as u32,
+                    }],
+                    ConstantInner::Scalar{value: ScalarValue::Sint(s), ..} => vec![CppType {
+                        name: Some(format!("std::array<{}, {}>", base_name, s)),
+                        size: s as u32 * stride as u32,
+                    }],
+                    _ => { panic!("An array size must be an int") },
+                },
+                Dynamic => vec![CppType {
+                    name: Some(format!("std::vector<{}>", base_name)),
+                    size: 0, // supposed to be the last field anyways
+                }],
+            }
+        },
+        Struct{span, ..} => vec![CppType {
+            name: ty.name.clone(),
+            size: span,
+        }],
+        _ => vec![CppType {
+            name: Some(format!("[Error: Type is not host-sharable!]")),
+            size: 0,
+        }],
     }
 }
 
@@ -210,7 +361,7 @@ fn format_pad(byte_size: u32, pad_count: &mut u32) -> String {
     }
 }
 
-fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>) {
+fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>, padding: u32) {
     let anonymous: String = "<anonymous>".to_string();
     let mut cpp_offset = 0;
     let mut pad_count = 0;
@@ -224,23 +375,24 @@ fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>) {
 
         assert!(cpp_offset <= m.offset);
         if cpp_offset < m.offset {
-            ctx.out.push_back(format_pad(m.offset - cpp_offset, &mut pad_count));
+            ctx.get_out().push_back(format_pad(m.offset - cpp_offset, &mut pad_count));
         }
 
-        let all_cpp_types = ty.to_cpp(ctx);
-        let has_multiple_fields = all_cpp_types.len() > 1;
+        // Transform a WGSL type into one or multiple C++ types
+        let cpp_fields = generate_cpp_fields(ty, ctx);
+        let has_multiple_fields = cpp_fields.len() > 1;
 
         if has_multiple_fields {
-            ctx.out.push_back(
+            ctx.get_out().push_back(
                 format!("\n  // '{}' is split in {}, at byte offset {}, size {}",
-                    name, all_cpp_types.len(), m.offset, type_size
+                    name, cpp_fields.len(), m.offset, type_size
                 )
             );
         }
 
         let mut sub_field_index = 0;
-        for cpp_type in all_cpp_types {
-            ctx.out.push_back(match cpp_type.name {
+        for cpp_type in cpp_fields {
+            ctx.get_out().push_back(match cpp_type.name {
                 Some(cpp_type_name) => match has_multiple_fields {
                     true => format!("  {} {}_col{};",
                         cpp_type_name, name, sub_field_index
@@ -260,12 +412,13 @@ fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>) {
         }
 
         if has_multiple_fields {
-            ctx.out.push_back("".to_string());
+            ctx.get_out().push_back("".to_string());
         }
     }
 
-    let aligned_cpp_offset = (cpp_offset + 15) & !15;
+    let p = padding - 1;
+    let aligned_cpp_offset = (cpp_offset + p) & !p;
     if cpp_offset < aligned_cpp_offset {
-        ctx.out.push_back(format_pad(aligned_cpp_offset - cpp_offset, &mut pad_count));
+        ctx.get_out().push_back(format_pad(aligned_cpp_offset - cpp_offset, &mut pad_count));
     }
 }

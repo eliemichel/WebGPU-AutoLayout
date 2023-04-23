@@ -2,6 +2,10 @@ const SHADER: &str = r#"
 struct Uniforms {
     kernel: mat3x3<f32>,
     test: f32,
+    test2: array<f32, 5>,
+    test3: array<vec3<f32>, 5>,
+    test3: array<vec4<f32>, 5>,
+    test3: array<mat3x3<f32>, 5>,
 }
 
 @group(0) @binding(0) var inputTexture: texture_2d<f32>;
