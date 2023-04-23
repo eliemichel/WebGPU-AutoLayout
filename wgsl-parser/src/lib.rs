@@ -7,7 +7,7 @@
 use naga::{
     front::wgsl::Frontend,
     TypeInner::{
-        Struct, Array, Scalar, Vector, Matrix, Atomic,
+        Struct, Array, Scalar, Vector, Matrix, Atomic, Image, Sampler
     },
     TypeInner,
     ConstantInner,
@@ -21,6 +21,7 @@ use naga::{
     ScalarKind,
     ScalarKind::{Float, Uint, Sint, Bool},
     VectorSize,
+    ImageClass,
 };
 
 use std::{
@@ -28,10 +29,19 @@ use std::{
     cmp::max,
 };
 
+// Short for outputing lines of C++
+macro_rules! out {
+    ($ctx:ident, $t:expr) => ($ctx.get_out().push_back(($t).into()))
+}
+macro_rules! out_format {
+    ($ctx:ident, $($t:tt)*) => ($ctx.get_out().push_back(format!($($t)*)))
+}
+
 enum ContextStage {
     Structs,
     PaddedStructs,
     Bindings,
+    Final,
 }
 struct Context<'a> {
     module: &'a Module,
@@ -40,6 +50,7 @@ struct Context<'a> {
     out_structs: LinkedList<String>,
     out_padded_structs: LinkedList<String>,
     out_bindings: LinkedList<String>,
+    out_final: LinkedList<String>,
 
     stage: ContextStage,
 
@@ -47,6 +58,8 @@ struct Context<'a> {
     // For each such type, we save its name.
     // NB: This is populated while filling out_structs.
     padded_structs: HashMap<Handle<Type>, String>,
+
+    bind_group_layout_reg: HashMap<u32, BindGroupLayout>,
 }
 impl<'a> Context<'a> {
     fn from_module(module: &'a Module) -> Self {
@@ -55,8 +68,10 @@ impl<'a> Context<'a> {
             out_structs: LinkedList::new(),
             out_padded_structs: LinkedList::new(),
             out_bindings: LinkedList::new(),
+            out_final: LinkedList::new(),
             stage: ContextStage::Structs,
             padded_structs: HashMap::new(),
+            bind_group_layout_reg: HashMap::new(),
         }
     }
 
@@ -65,7 +80,35 @@ impl<'a> Context<'a> {
             ContextStage::Structs => &mut self.out_structs,
             ContextStage::PaddedStructs => &mut self.out_padded_structs,
             ContextStage::Bindings => &mut self.out_bindings,
+            ContextStage::Final => &mut self.out_final,
         };
+    }
+}
+
+#[derive(Clone)]
+struct BindGroupLayoutEntry {
+    name: String,
+    config: LinkedList<String>,
+    config_layout: LinkedList<String>,
+}
+impl BindGroupLayoutEntry {
+    fn new(name: &str) -> Self {
+        return Self {
+            name: name.to_string(),
+            config: LinkedList::new(),
+            config_layout: LinkedList::new(),
+        }
+    }
+}
+#[derive(Clone)]
+struct BindGroupLayout {
+    entries: HashMap<u32, BindGroupLayoutEntry>,
+}
+impl BindGroupLayout {
+    fn new() -> Self {
+        return Self {
+            entries: HashMap::new(),
+        }
     }
 }
 
@@ -175,46 +218,171 @@ pub fn generate_cpp_binding(wgsl_source: &str) -> String {
     // Bindings
     ctx.stage = ContextStage::Bindings;
     for entry in module.global_variables.iter() {
-        generate_cpp_bind_layout(&mut ctx, &entry.1);
+        process_bind_layout(&mut ctx, &entry.1);
+    }
+    if ctx.bind_group_layout_reg.len() > 0 {
+        generate_cpp_bind_layouts(&mut ctx);
+        generate_cpp_bind_groups(&mut ctx);
     }
 
     // Final code production
-    let mut out: LinkedList<String> = LinkedList::new();
+    ctx.stage = ContextStage::Final;
 
-    out.push_back("// C++ binding".to_string());
-    out.push_back("#include <glm/glm.hpp>".to_string());
-    out.push_back("using namespace glm;".to_string());
-    out.push_back("".to_string());
+    out!(ctx, "// C++ binding");
+    out!(ctx, "");
+    out!(ctx, "#include <glm/glm.hpp> // from https://github.com/g-truc/glm");
+    out!(ctx, "using namespace glm;");
+    if ctx.out_bindings.len() > 0 {
+        out!(ctx, "#include <webgpu/webgpu.hpp> // from https://github.com/eliemichel/WebGPU-Cpp");
+        out!(ctx, "using namespace wgpu;");
+        out!(ctx, "#include <vector>");
+    }
+    out!(ctx, "");
 
     if ctx.out_padded_structs.len() > 0 {
-        out.push_back("// Padded structures".to_string());
-        out.push_back("".to_string());
-        out.append(&mut ctx.out_padded_structs);
+        out!(ctx, "// Padded structures");
+        out!(ctx, "");
+        ctx.out_final.append(&mut ctx.out_padded_structs);
     }
 
     if ctx.out_structs.len() > 0 {
-        out.push_back("// Host-sharable structures".to_string());
-        out.push_back("".to_string());
-        out.append(&mut ctx.out_structs);
+        out!(ctx, "// Host-sharable structures");
+        out!(ctx, "");
+        ctx.out_final.append(&mut ctx.out_structs);
     }
 
     if ctx.out_bindings.len() > 0 {
-        out.push_back("// Bind Group Layouts".to_string());
-        out.push_back("".to_string());
-        out.append(&mut ctx.out_bindings);
+        out!(ctx, "// Bind Group Layouts");
+        out!(ctx, "");
+        ctx.out_final.append(&mut ctx.out_bindings);
     }
 
-    return out.into_iter().collect::<Vec<_>>().join("\n");
+    return ctx.out_final.into_iter().collect::<Vec<_>>().join("\n");
 }
 
-fn generate_cpp_bind_layout(ctx: &mut Context, variable: &GlobalVariable) {
+fn process_bind_layout(ctx: &mut Context, variable: &GlobalVariable) {
     let anonymous: String = "<anonymous>".to_string();
     let name = match &variable.name {
         Some(name) => name,
         None => &anonymous
     };
 
-    ctx.get_out().push_back(format!("var {};", name));
+    match &variable.binding {
+        Some(binding) => {
+            let bind_group_layout = ctx.bind_group_layout_reg.entry(binding.group).or_insert(BindGroupLayout::new());
+            let entry = bind_group_layout.entries.entry(binding.binding).or_insert(BindGroupLayoutEntry::new(name));
+            match &ctx.module.types[variable.ty].inner {
+                Image{class: ImageClass::Storage{format, access}, ..} => {
+                    entry.config_layout.push_back("storageTexture.access = StorageTextureAccess::WriteOnly;".into());
+                    entry.config_layout.push_back("storageTexture.format = TextureFormat::RGBA8Unorm;".into());
+                    entry.config_layout.push_back("storageTexture.viewDimension = TextureViewDimension::_2D;".into());
+
+                    entry.config.push_back("textureView = nullptr; // EDIT HERE".into());
+                }
+                Image{class: ImageClass::Depth{multi}, ..} => {
+                    entry.config_layout.push_back("texture.sampleType = TextureSampleType::Float;".into());
+                    entry.config_layout.push_back("texture.viewDimension = TextureViewDimension::_2D;".into());
+
+                    entry.config.push_back("textureView = nullptr; // EDIT HERE".into());
+                }
+                Image{class: ImageClass::Sampled{kind, multi}, ..} => {
+                    entry.config_layout.push_back("texture.sampleType = TextureSampleType::Float;".into());
+                    entry.config_layout.push_back("texture.viewDimension = TextureViewDimension::_2D;".into());
+
+                    entry.config.push_back("textureView = nullptr; // EDIT HERE".into());
+                }
+                Sampler{..} => {
+                    entry.config_layout.push_back("sampler.type = SamplerBindingType::Filtering;".into());
+
+                    entry.config.push_back("sampler = nullptr; // EDIT HERE".into());
+                }
+                _ => {
+                    entry.config_layout.push_back("buffer.type = BufferBindingType::Uniform;".into());
+                    entry.config_layout.push_back("buffer.minBindingSize = sizeof(Uniforms);".into());
+
+                    entry.config.push_back("buffer = nullptr; // EDIT HERE".into());
+                    entry.config.push_back("offset = 0;".into());
+                    entry.config.push_back("size = sizeof(???);".into());
+                }
+            };
+        },
+        None => (),
+    };
+}
+
+fn generate_cpp_bind_layouts(ctx: &mut Context) {
+    let reg = ctx.bind_group_layout_reg.clone();
+    out!(ctx, "std::vector<BindGroupLayout> initBindGroupLayouts(Device device) {");
+    out_format!(ctx, "  std::vector<BindGroupLayout> bindGroupLayouts({}, nullptr);", reg.len());
+    out!(ctx, "");
+    let mut group_idx = 0;
+    for pair in reg.iter() {
+        let bind_group = pair.0;
+        let bind_group_layout = pair.1;
+        out_format!(ctx, "  {{ // bind group {bind_group}");
+        out_format!(ctx, "    std::vector<BindGroupLayoutEntry> entries({}, Default);", bind_group_layout.entries.len());
+        out!(ctx, "");
+        let mut idx = 0;
+        for subpair in bind_group_layout.entries.iter() {
+            let binding = subpair.0;
+            let entry = subpair.1;
+            out_format!(ctx, "    // Binding '{}'", entry.name);
+            out_format!(ctx, "    entries[{idx}].binding = {binding};");
+            for line in entry.config_layout.iter() {
+                out_format!(ctx, "    entries[{idx}].{line}");
+            }
+            out_format!(ctx, "    entries[{idx}].visibility = ShaderStage::Compute; // EDIT HERE");
+            idx += 1;
+            out!(ctx, "");
+        }
+        
+        out!(ctx, "    BindGroupLayoutDescriptor bindGroupLayoutDesc;");
+        out!(ctx, "    bindGroupLayoutDesc.entryCount = (uint32_t)entries.size();");
+        out!(ctx, "    bindGroupLayoutDesc.entries = entries.data();");
+        out_format!(ctx, "    bindGroupLayouts[{group_idx}] = device.createBindGroupLayout(bindGroupLayoutDesc);");
+        out!(ctx, "  }\n");
+        group_idx += 1;
+    }
+    out!(ctx, "  return bindGroupLayouts;");
+    out!(ctx, "}");
+    out!(ctx, "");
+}
+
+fn generate_cpp_bind_groups(ctx: &mut Context) {
+    let reg = ctx.bind_group_layout_reg.clone();
+    out!(ctx, "std::vector<BindGroup> initBindGroups(Device device, std::vector<BindGroupLayout> bindGroupLayouts) {");
+    out_format!(ctx, "  std::vector<BindGroup> bindGroups({}, nullptr);", reg.len());
+    out!(ctx, "");
+    let mut group_idx = 0;
+    for pair in reg.iter() {
+        let bind_group = pair.0;
+        let bind_group_layout = pair.1;
+        out_format!(ctx, "  {{ // bind group {bind_group}");
+        out_format!(ctx, "    std::vector<BindGroupEntry> entries({}, Default);", bind_group_layout.entries.len());
+        out!(ctx, "");
+        let mut entry_idx = 0;
+        for subpair in bind_group_layout.entries.iter() {
+            let binding = subpair.0;
+            let entry = subpair.1;
+            out_format!(ctx, "    // Binding '{}'", entry.name);
+            out_format!(ctx, "    entries[{entry_idx}].binding = {binding};");
+            for line in entry.config.iter() {
+                out_format!(ctx, "    entries[{entry_idx}].{line}");
+            }
+            entry_idx += 1;
+            out!(ctx, "");
+        }
+
+        out!(ctx, "    BindGroupDescriptor bindGroupDesc;");
+        out_format!(ctx, "    bindGroupDesc.layout = bindGroupLayouts[{group_idx}];");
+        out!(ctx, "    bindGroupDesc.entryCount = (uint32_t)entries.size();");
+        out!(ctx, "    bindGroupDesc.entries = (WGPUBindGroupEntry*)entries.data();");
+        out_format!(ctx, "    bindGroups[{group_idx}] = device.createBindGroup(bindGroupDesc);");
+        out!(ctx, "  }\n");
+        group_idx += 1;
+    }
+    out!(ctx, "  return bindGroups;");
+    out!(ctx, "}");
 }
 
 fn generate_cpp_type_def(ctx: &mut Context, ty: &Type, padding: u32) {
@@ -225,10 +393,10 @@ fn generate_cpp_type_def(ctx: &mut Context, ty: &Type, padding: u32) {
     };
 
     if let Struct{members, span: _} = &ty.inner {
-        ctx.get_out().push_back(format!("struct {} {{", name));
+        out_format!(ctx, "struct {} {{", name);
         generate_cpp_struct_def(ctx, members, padding);
-        ctx.get_out().push_back("};".to_string());
-        ctx.get_out().push_back(format!("static_assert(sizeof({}) % {} == 0)\n", name, padding));
+        out!(ctx, "};");
+        out_format!(ctx, "static_assert(sizeof({}) % {} == 0)\n", name, padding);
     }
 }
 
@@ -375,7 +543,7 @@ fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>, paddi
 
         assert!(cpp_offset <= m.offset);
         if cpp_offset < m.offset {
-            ctx.get_out().push_back(format_pad(m.offset - cpp_offset, &mut pad_count));
+            out!(ctx, format_pad(m.offset - cpp_offset, &mut pad_count));
         }
 
         // Transform a WGSL type into one or multiple C++ types
@@ -383,16 +551,15 @@ fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>, paddi
         let has_multiple_fields = cpp_fields.len() > 1;
 
         if has_multiple_fields {
-            ctx.get_out().push_back(
-                format!("\n  // '{}' is split in {}, at byte offset {}, size {}",
-                    name, cpp_fields.len(), m.offset, type_size
-                )
+            out_format!(ctx,
+                "\n  // '{}' is split in {}, at byte offset {}, size {}",
+                name, cpp_fields.len(), m.offset, type_size
             );
         }
 
         let mut sub_field_index = 0;
         for cpp_type in cpp_fields {
-            ctx.get_out().push_back(match cpp_type.name {
+            out!(ctx, match cpp_type.name {
                 Some(cpp_type_name) => match has_multiple_fields {
                     true => format!("  {} {}_col{};",
                         cpp_type_name, name, sub_field_index
@@ -412,13 +579,13 @@ fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>, paddi
         }
 
         if has_multiple_fields {
-            ctx.get_out().push_back("".to_string());
+            out!(ctx, "");
         }
     }
 
     let p = padding - 1;
     let aligned_cpp_offset = (cpp_offset + p) & !p;
     if cpp_offset < aligned_cpp_offset {
-        ctx.get_out().push_back(format_pad(aligned_cpp_offset - cpp_offset, &mut pad_count));
+        out!(ctx, format_pad(aligned_cpp_offset - cpp_offset, &mut pad_count));
     }
 }
