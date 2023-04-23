@@ -30,3 +30,8 @@ pub fn run(shader_source: &str) -> String {
     wgsl_parser::inspect_from_source(shader_source);
     return serialized;
 }
+
+#[wasm_bindgen]
+pub fn generate_cpp_binding(shader_source: &str) -> String {
+    return wgsl_parser::generate_cpp_binding(shader_source);
+}

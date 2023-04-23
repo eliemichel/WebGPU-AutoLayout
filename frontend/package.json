@@ -10,7 +10,9 @@
     },
     "devDependencies": {
         "@wasm-tool/wasm-pack-plugin": "^1.7.0",
+        "ace-builds": "^1.18.0",
         "css-loader": "^6.7.3",
+        "file-loader": "^6.2.0",
         "html-webpack-plugin": "^5.5.1",
         "style-loader": "^3.3.2",
         "webpack": "^5.80.0",
