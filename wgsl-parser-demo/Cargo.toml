@@ -5,6 +5,7 @@ edition = "2021"
 authors = ["Elie Michel <elie.michel@exppad.com>"]
 description = "Demo for wgsl_parser, backend of the WebGPU-Autolayout webapp"
 license = "MIT"
+repository = "https://github.com/eliemichel/WebGPU-AutoLayout"
 
 [dependencies]
 wgsl-parser = { path = "../wgsl-parser" }

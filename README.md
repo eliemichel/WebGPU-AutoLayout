@@ -14,3 +14,14 @@ cd frontend
 npm install
 npm run build
 ```
+
+Developing
+----------
+
+```
+cd frontend
+npm run start
+```
+
+The dev server automatically calls `cargo build` whenever the rust files change.
+

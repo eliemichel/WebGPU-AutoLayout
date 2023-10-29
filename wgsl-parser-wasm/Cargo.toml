@@ -5,6 +5,7 @@ edition = "2021"
 authors = ["Elie Michel <elie.michel@exppad.com>"]
 description = "WebAssembly binding for wgsl_parser"
 license = "MIT"
+repository = "https://github.com/eliemichel/WebGPU-AutoLayout"
 
 [lib]
 crate-type = ["cdylib"]

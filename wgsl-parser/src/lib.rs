@@ -10,14 +10,12 @@ use naga::{
         Struct, Array, Scalar, Vector, Matrix, Atomic, Image, Sampler
     },
     TypeInner,
-    ConstantInner,
     ArraySize::{Constant, Dynamic},
     Type,
     GlobalVariable,
     StructMember,
     Module,
     Handle,
-    ScalarValue,
     ScalarKind,
     ScalarKind::{Float, Uint, Sint, Bool},
     VectorSize,
@@ -208,7 +206,7 @@ pub fn generate_cpp_binding(wgsl_source: &str) -> String {
                     binding: None,
                     offset: 0,
                 }],
-                span: value_ty.inner.size(&ctx.module.constants),
+                span: value_ty.inner.size(ctx.module.to_ctx()),
             },
         };
         let padding = align_of(&value_ty.inner, &ctx);
@@ -434,7 +432,7 @@ fn generate_cpp_fields(ty: &Type, ctx: &mut Context) -> Vec<CppType> {
                 Bool => "d",
             };
             let mut s = size.to_u32();
-            if s == 3 { s = 4; }
+            //if s == 3 { s = 4; } -> must be 3 when followed by a f32, padding should ensure 4 otherwise
             vec![CppType {
                 name: Some(format!("{}vec{}", prefix, s)),
                 size: s * width as u32,
@@ -474,17 +472,10 @@ fn generate_cpp_fields(ty: &Type, ctx: &mut Context) -> Vec<CppType> {
                 _ => add_extra_struct(base, ctx)
             };
             match size {
-                Constant(cst) => match ctx.module.constants[cst].inner {
-                    ConstantInner::Scalar{value: ScalarValue::Uint(s), ..} => vec![CppType {
-                        name: Some(format!("std::array<{}, {}>", base_name, s)),
-                        size: s as u32 * stride as u32,
-                    }],
-                    ConstantInner::Scalar{value: ScalarValue::Sint(s), ..} => vec![CppType {
-                        name: Some(format!("std::array<{}, {}>", base_name, s)),
-                        size: s as u32 * stride as u32,
-                    }],
-                    _ => { panic!("An array size must be an int") },
-                },
+                Constant(cst) => vec![CppType {
+                    name: Some(format!("std::array<{}, {}>", base_name, cst.get())),
+                    size: cst.get() * stride as u32,
+                }],
                 Dynamic => vec![CppType {
                     name: Some(format!("std::vector<{}>", base_name)),
                     size: 0, // supposed to be the last field anyways
@@ -521,7 +512,7 @@ fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>, paddi
             None => &anonymous
         };
         let ty = &ctx.module.types[m.ty];
-        let type_size = ty.inner.size(&ctx.module.constants);
+        let type_size = ty.inner.size(ctx.module.to_ctx());
 
         assert!(cpp_offset <= m.offset);
         if cpp_offset < m.offset {
