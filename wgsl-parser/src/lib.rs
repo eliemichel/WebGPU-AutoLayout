@@ -58,6 +58,8 @@ struct Context<'a> {
     padded_structs: HashMap<Handle<Type>, String>,
 
     bind_group_layout_reg: HashMap<u32, BindGroupLayout>,
+
+    use_alignas: bool,
 }
 impl<'a> Context<'a> {
     fn from_module(module: &'a Module) -> Self {
@@ -70,6 +72,7 @@ impl<'a> Context<'a> {
             stage: ContextStage::Structs,
             padded_structs: HashMap::new(),
             bind_group_layout_reg: HashMap::new(),
+            use_alignas: false,
         }
     }
 
@@ -175,7 +178,7 @@ fn align_of(inner: &TypeInner, ctx: &Context) -> u32 {
     }
 }
 
-pub fn generate_cpp_binding(wgsl_source: &str) -> String {
+pub fn generate_cpp_binding(wgsl_source: &str, use_alignas: bool) -> String {
     let mut frontend = Frontend::new();
     let module = match  frontend.parse(wgsl_source) {
         Ok(module) => module,
@@ -186,6 +189,7 @@ pub fn generate_cpp_binding(wgsl_source: &str) -> String {
     };
 
     let mut ctx = Context::from_module(&module);
+    ctx.use_alignas = use_alignas;
 
     // Host-sharable structs
     ctx.stage = ContextStage::Structs;
@@ -516,7 +520,11 @@ fn generate_cpp_struct_def(ctx: &mut Context, members: &Vec<StructMember>, paddi
 
         assert!(cpp_offset <= m.offset);
         if cpp_offset < m.offset {
-            out!(ctx, format_pad(m.offset - cpp_offset, &mut pad_count));
+            if ctx.use_alignas {
+                out_format!(ctx, "  alignas({})", m.offset);
+            } else {
+                out!(ctx, format_pad(m.offset - cpp_offset, &mut pad_count));
+            }
             cpp_offset = m.offset;
         }
 

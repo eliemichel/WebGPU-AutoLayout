@@ -40,18 +40,26 @@ const wgslEditor = ace.edit(null, {
 const cppEditor = ace.edit(null, {
   maxLines: 50,
   minLines: 10,
-  value: generate_cpp_binding(SHADER),
+  value: generate_cpp_binding(SHADER, false /* useAlignas */),
   mode: "ace/mode/c_cpp",
   theme: "ace/theme/xcode",
   readOnly: true,
 })
 
-wgslEditor.session.on('change', function(delta) {
-    const wgsl = wgslEditor.getValue();
-    const cpp = generate_cpp_binding(wgsl);
-    cppEditor.setValue(cpp);
-    cppEditor.selection.clearSelection();
-});
+const useAlignasRef = {
+  current: null,
+};
+
+function recomputeCppEditorValue() {
+  const useAlignas = useAlignasRef.current ? useAlignasRef.current.checked : false;
+  console.log("useAlignas", useAlignas);
+  const wgsl = wgslEditor.getValue();
+  const cpp = generate_cpp_binding(wgsl, useAlignas);
+  cppEditor.setValue(cpp);
+  cppEditor.selection.clearSelection();
+}
+
+wgslEditor.session.on('change', recomputeCppEditorValue);
 
 function wgslEditorComponent() {
 
@@ -75,6 +83,26 @@ function cppEditorComponent() {
   return root;
 }
 
+function optionsComponent() {
+
+  const label = document.createElement('label');
+  
+  const checkbox = document.createElement('input');
+  checkbox.type = "checkbox";
+  checkbox.id = "use-alignas";
+  useAlignasRef.current = checkbox;
+  checkbox.addEventListener('change', recomputeCppEditorValue);
+
+  const labelText = document.createTextNode("use alignas");
+
+  label.replaceChildren(checkbox, labelText);
+
+  const root = document.createElement('div');
+  root.replaceChildren(label);
+
+  return root;
+}
+
 function infoComponent() {
 
   const info = document.createElement('p');
@@ -93,4 +121,5 @@ function infoComponent() {
 
 document.body.appendChild(wgslEditorComponent());
 document.body.appendChild(cppEditorComponent());
+document.body.appendChild(optionsComponent());
 document.body.appendChild(infoComponent());

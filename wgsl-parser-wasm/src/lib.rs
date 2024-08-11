@@ -14,6 +14,6 @@ extern "C" {
 */
 
 #[wasm_bindgen]
-pub fn generate_cpp_binding(shader_source: &str) -> String {
-    return wgsl_parser::generate_cpp_binding(shader_source);
+pub fn generate_cpp_binding(shader_source: &str, use_alignas: bool) -> String {
+    return wgsl_parser::generate_cpp_binding(shader_source, use_alignas);
 }
